@@ -25,8 +25,8 @@ Output (into results/YYYY_MM/):
 
 Env:  SONAR_URL (default http://localhost:9000), SONAR_TOKEN (required)
 Usage:
-  python monthly_platform_snapshot.py --date 2026-07-05
-  python monthly_platform_snapshot.py --date 2026-08-05 --baseline results/2026_07/platform_report_2026_07_05.csv
+  python 2_platform_snapshot.py --date 2026-07-05
+  python 2_platform_snapshot.py --date 2026-08-05 --baseline results/2026_07/platform_report_2026_07_05.csv
 """
 
 import os
@@ -37,6 +37,7 @@ import argparse
 import urllib.request
 import urllib.parse
 import base64
+from collections import Counter
 from datetime import datetime, timezone, date, timedelta
 
 # =========================================================
@@ -186,6 +187,11 @@ def main():
             break
         page += 1
 
+    if not projects:
+        print("\nFATAL: project list is empty - check SONAR_URL / token / connectivity.")
+        print("(no CSV written; an empty report would poison next month's baseline)")
+        sys.exit(1)
+
     # 2. per-project platform metrics
     print("Mengambil last scan, LoC, duplication, QG/QP...")
     for pkey, d in projects.items():
@@ -261,7 +267,14 @@ def main():
     print(f"Total LoC       : {total_loc:,} / {LICENSE_LOC:,} ({total_loc / LICENSE_LOC:.1%})")
     print(f"Remaining       : {LICENSE_LOC - total_loc:,} LoC")
     print(f"Inactive LoC    : {inact_loc:,}")
-    print(f"QG status       : " + ", ".join(f"{d['project_key']}={d['alert_status']}" for d in rows))
+
+    qg_counts  = Counter(d["alert_status"] for d in projects.values())
+    qg_summary = ", ".join(f"{n} {s}" for s, n in sorted(qg_counts.items(), key=lambda kv: -kv[1]))
+    print(f"QG status       : {qg_summary}")
+    failing = sorted(d["project_key"] for d in projects.values() if d["alert_status"] == "ERROR")
+    if failing:
+        print(f"QG failing      : {', '.join(failing)}")
+
     print("=" * 60)
     print(f"\nOutput:\n  {REPORT_CSV}")
     print(f"\n(keep this file - pass it as --baseline next month for LoC/dup deltas)")
@@ -273,3 +286,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
+

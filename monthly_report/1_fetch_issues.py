@@ -18,8 +18,8 @@ parser = argparse.ArgumentParser(
         "No --date  : live snapshot as of today (normal mode)\n"
         "--date     : reconstruct historical state as of that date\n\n"
         "Outputs:\n"
-        "  results/open_issues_<date>.csv\n"
-        "  results/closed_issues_<date>.csv"
+        "  results/YYYY_MM/open_issues_YYYY_MM_DD.csv\n"
+        "  results/YYYY_MM/closed_issues_YYYY_MM_DD.csv"
     ),
     formatter_class=argparse.RawDescriptionHelpFormatter
 )
@@ -50,6 +50,10 @@ if args.date:
 
 HISTORICAL_MODE = CUTOFF_DT is not None
 
+# --- Unified output naming: results/YYYY_MM/, files dated YYYY_MM_DD ---
+FILE_DATE = date_label.replace("-", "_")          # "2026-07-05" -> "2026_07_05"
+MONTH_STR = date_label[:7].replace("-", "_")      # "2026-07-05" -> "2026_07"
+
 # =========================================================
 # 2. Environment
 # =========================================================
@@ -62,11 +66,11 @@ if not SONAR_TOKEN:
 # =========================================================
 # 3. Output Paths
 # =========================================================
-OUTPUT_DIR = "results"
+OUTPUT_DIR = os.path.join("results", MONTH_STR)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-OPEN_ISSUES_CSV   = os.path.join(OUTPUT_DIR, f"open_issues_{date_label}.csv")
-CLOSED_ISSUES_CSV = os.path.join(OUTPUT_DIR, f"closed_issues_{date_label}.csv")
+OPEN_ISSUES_CSV   = os.path.join(OUTPUT_DIR, f"open_issues_{FILE_DATE}.csv")
+CLOSED_ISSUES_CSV = os.path.join(OUTPUT_DIR, f"closed_issues_{FILE_DATE}.csv")
 
 # =========================================================
 # 4. API Helper
@@ -177,10 +181,10 @@ def parse_sonar_dt(dt_str):
         # Handle both +0700 and +07:00 offset formats
         cleaned = dt_str.strip()
         if len(cleaned) > 5 and cleaned[-3] == ":" and cleaned[-6] in "+-":
-            # already +HH:MM — python 3.6 strptime handles %z with colon on 3.7+
+            # already +HH:MM — python strptime handles %z with colon on 3.7+
             pass
         elif len(cleaned) > 4 and cleaned[-5] in "+-" and ":" not in cleaned[-5:]:
-            # +0700 → +07:00
+            # +0700 -> +07:00
             cleaned = cleaned[:-2] + ":" + cleaned[-2:]
         return datetime.strptime(cleaned[:25], "%Y-%m-%dT%H:%M:%S%z")
     except Exception:
@@ -479,7 +483,7 @@ def fetch_all_resolved(project_map, user_map, open_records, closed_records):
                         continue
 
                     if resolution_dt and resolution_dt > CUTOFF_DT:
-                        # Was resolved AFTER the cutoff → it was still OPEN on that date
+                        # Was resolved AFTER the cutoff -> it was still OPEN on that date
                         issue_key    = issue.get("key", "")
                         assignee_raw = issue.get("assignee", "")
                         mapped_type  = ISSUE_TYPE_MAP.get(issue.get("type", ""), issue.get("type", ""))
@@ -494,7 +498,7 @@ def fetch_all_resolved(project_map, user_map, open_records, closed_records):
                             issue.get("effort", "0min"),
                         ))
                     else:
-                        # Resolved ON or BEFORE the cutoff → genuinely closed
+                        # Resolved ON or BEFORE the cutoff -> genuinely closed
                         _append_closed_issue(pname, pkey, issue, user_map, closed_records)
                 else:
                     # Live mode: everything resolved goes to closed
@@ -699,3 +703,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

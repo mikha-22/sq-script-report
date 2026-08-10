@@ -1,0 +1,5 @@
+.repomixignore
+repomix-output.xml
+result
+result/*
+
