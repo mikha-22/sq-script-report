@@ -2,4 +2,5 @@
 repomix-output.xml
 result
 result/*
-
+results_actual
+results_actual/*
