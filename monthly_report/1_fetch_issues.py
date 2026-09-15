@@ -217,18 +217,76 @@ def days_between(created_str, resolved_str):
     except Exception:
         return ""
 
+# --- changelog / hotspot-detail caches (avoid refetching the same key) ---
+_CHANGELOG_CACHE = {}
+_HOTSPOT_CACHE   = {}
+
+CLOSED_STATUSES = {"CLOSED", "RESOLVED", "REVIEWED"}
+
+def get_issue_changelog(issue_key):
+    """Fetch (and cache) an issue's changelog entries."""
+    if issue_key not in _CHANGELOG_CACHE:
+        data = api_get("/api/issues/changelog", {"issue": issue_key}, silent_404=True)
+        _CHANGELOG_CACHE[issue_key] = (data or {}).get("changelog", []) or []
+    return _CHANGELOG_CACHE[issue_key]
+
+def get_hotspot_detail(hotspot_key):
+    """Fetch (and cache) /api/hotspots/show for a hotspot."""
+    if hotspot_key not in _HOTSPOT_CACHE:
+        _HOTSPOT_CACHE[hotspot_key] = api_get(
+            "/api/hotspots/show", {"hotspot": hotspot_key}, silent_404=True
+        ) or {}
+    return _HOTSPOT_CACHE[hotspot_key]
+
+def _resolution_date_from_changelog(changelog):
+    """
+    Timestamp of the LAST transition into a closed/resolved state.
+
+    updateDate is NOT the resolution date - it moves on any later edit
+    (comment, assignee change, rescan, close->reopen). Reading the actual
+    status/resolution transition from the changelog is what makes
+    resolution_date mean what its name says.
+
+    Taking the last (not first) match means a close -> reopen -> close
+    cycle reports the final closure. Returns "" if nothing is recorded.
+    """
+    found = ""
+    for log in changelog or []:
+        when = log.get("creationDate", "")
+        if not when:
+            continue
+        for diff in log.get("diffs", []):
+            key       = diff.get("key")
+            new_value = str(diff.get("newValue") or "").upper()
+            if key == "resolution" and new_value:
+                found = when
+            elif key == "status" and new_value in CLOSED_STATUSES:
+                found = when
+    return found
+
+def resolution_date_for_issue(issue):
+    """Real resolution timestamp for a regular issue; falls back to updateDate."""
+    key = issue.get("key", "")
+    if key:
+        found = _resolution_date_from_changelog(get_issue_changelog(key))
+        if found:
+            return found
+    return issue.get("updateDate", "")
+
+def resolution_date_for_hotspot(h_detail, fallback):
+    """Real resolution timestamp for a hotspot; falls back to the passed updateDate."""
+    found = _resolution_date_from_changelog((h_detail or {}).get("changelog", []))
+    return found or fallback
+
 def get_assigner_from_issue(issue_key):
-    data = api_get("/api/issues/changelog", {"issue": issue_key}, silent_404=True)
-    if not data or "changelog" not in data:
-        return ""
-    for log in data["changelog"]:
+    for log in get_issue_changelog(issue_key):
         for diff in log.get("diffs", []):
             if diff.get("key") == "assignee":
                 return log.get("userName") or log.get("user", "")
     return ""
 
 def get_hotspot_users(hotspot_key, user_map):
-    data = api_get("/api/hotspots/show", {"hotspot": hotspot_key}, silent_404=True)
+    data = get_hotspot_detail(hotspot_key)
     if not data:
         return "", ""
     for u in data.get("users", []):
@@ -472,7 +530,7 @@ def fetch_all_resolved(project_map, user_map, open_records, closed_records):
 
             for issue in data["issues"]:
                 created_at      = issue.get("creationDate", "")
-                resolution_date = issue.get("updateDate", "")
+                resolution_date = resolution_date_for_issue(issue)
 
                 created_dt    = parse_sonar_dt(created_at)
                 resolution_dt = parse_sonar_dt(resolution_date)
@@ -528,7 +586,9 @@ def fetch_all_resolved(project_map, user_map, open_records, closed_records):
 
             for h in h_data["hotspots"]:
                 created_at      = h.get("creationDate", "")
-                resolution_date = h.get("updateDate", "")
+                resolution_date = resolution_date_for_hotspot(
+                    get_hotspot_detail(h.get("key", "")), h.get("updateDate", "")
+                )
 
                 created_dt    = parse_sonar_dt(created_at)
                 resolution_dt = parse_sonar_dt(resolution_date)
@@ -581,6 +641,7 @@ def _append_closed_issue(pname, pkey, issue, user_map, closed_records):
     mapped_type  = ISSUE_TYPE_MAP.get(issue.get("type", ""), issue.get("type", ""))
     raw_assigner = get_assigner_from_issue(issue_key) if assignee_raw else ""
     comments     = format_comments(issue.get("comments", []), user_map)
+    resolved_at  = resolution_date_for_issue(issue)
 
     closed_records.append({
         "project_name":          pname,
@@ -599,18 +660,19 @@ def _append_closed_issue(pname, pkey, issue, user_map, closed_records):
         "resolution":            resolution_label(issue.get("resolution", "")),
         "justification/comment": clean_text(comments),
         "created_at":            issue.get("creationDate", ""),
-        "resolution_date":       issue.get("updateDate", ""),
-        "days_to_resolve":       days_between(issue.get("creationDate", ""), issue.get("updateDate", "")),
+        "resolution_date":       resolved_at,
+        "days_to_resolve":       days_between(issue.get("creationDate", ""), resolved_at),
     })
 
 def _append_closed_hotspot(pname, pkey, h, user_map, closed_records):
     h_key    = h.get("key", "")
-    h_detail = api_get("/api/hotspots/show", {"hotspot": h_key}) or {}
+    h_detail = get_hotspot_detail(h_key)
 
     raw_resolution = h_detail.get("resolution") or h.get("resolution", "")
     raw_assigner_h = get_assigner_from_hotspot_detail(h_detail)
     raw_assignee_h = h_detail.get("assignee") or h.get("assignee", "")
     comments       = format_comments(h_detail.get("comment", []), user_map)
+    resolved_at    = resolution_date_for_hotspot(h_detail, h.get("updateDate", ""))
 
     closed_records.append({
         "project_name":          pname,
@@ -628,8 +690,8 @@ def _append_closed_hotspot(pname, pkey, h, user_map, closed_records):
         "resolution":            resolution_label(raw_resolution),
         "justification/comment": clean_text(comments),
         "created_at":            h.get("creationDate", ""),
-        "resolution_date":       h.get("updateDate", ""),
-        "days_to_resolve":       days_between(h.get("creationDate", ""), h.get("updateDate", "")),
+        "resolution_date":       resolved_at,
+        "days_to_resolve":       days_between(h.get("creationDate", ""), resolved_at),
     })
 
 # =========================================================
@@ -703,4 +765,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
